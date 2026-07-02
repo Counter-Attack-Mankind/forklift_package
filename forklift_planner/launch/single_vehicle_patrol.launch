@@ -1,0 +1,34 @@
+<launch>
+  <!-- RViz seven-vehicle one-shot patrol simulation. -->
+
+  <param name="/use_sim_time" value="false"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+
+  <!-- Use seven known-valid, non-overlapping start/target pairs. -->
+  <param name="/forklift_planner/multi_vehicle/vehicle_count" value="8"/>
+  <param name="/forklift_planner/multi_vehicle/show_paths" value="false"/>
+  <param name="/forklift_planner/multi_vehicle/simple_forward_demo" value="false"/>
+  <rosparam param="/forklift_planner/multi_vehicle/start_slots">[38, 20, 22, 44, 1, 49, 57, 15]</rosparam>
+  <rosparam param="/forklift_planner/multi_vehicle/target_slots">[9, 10, 8, 7, 40, 55, 42, 24]</rosparam>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="false"/>
+
+  <node pkg="forklift_map" type="map_node" name="forklift_map" output="screen" />
+
+  <node pkg="forklift_planner"
+        type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node"
+        output="screen">
+    <param name="target_only" value="-1"/>
+    <!-- false means: after reaching one target and dwelling, assign the next reachable target. -->
+    <param name="one_shot" value="true"/>
+  </node>
+
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

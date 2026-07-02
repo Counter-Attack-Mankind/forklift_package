@@ -1,0 +1,29 @@
+<launch>
+  <param name="/use_sim_time" value="false"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+
+  <node pkg="forklift_map" type="map_node" name="forklift_map" output="screen" />
+
+  <node pkg="forklift_planner"
+        type="two_vehicle_sim_node"
+        name="two_vehicle_sim_node"
+        output="screen">
+    <param name="vehicle_a_start_slot" value="0" />
+    <param name="vehicle_a_target_slot" value="67" />
+    <param name="vehicle_b_start_slot" value="67" />
+    <param name="vehicle_b_target_slot" value="0" />
+    <param name="time_step" value="0.05" />
+    <param name="delay_step" value="0.10" />
+    <param name="safety_margin" value="0.04" />
+    <param name="loop_visualization" value="true" />
+  </node>
+
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

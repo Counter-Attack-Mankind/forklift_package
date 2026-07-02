@@ -1,0 +1,116 @@
+forklift_planner:
+  # 单车运动模型参数
+  vehicle_speed:    0.20   # m/s，单车参考速度
+  stop_duration:    2.0    # s，泊车点等待时间
+  wheel_base:       0.143  # m，轴距
+  max_steer_angle:  0.40   # rad，最大转向角
+  max_steer_rate:   0.25   # rad/s，最大转向角速度
+  path_resolution:  0.01   # m，路径采样间隔
+
+  # 转弯/泊车路径模型
+  # turn_model: "arc" 或 "clothoid"；clothoid 为曲率连续版本
+  # terminal_docking_mode: "auto" / "forward" / "reverse"
+  # auto 表示末端空间不足时自动选择倒车入位
+  turn_model:       "clothoid"
+  terminal_docking_mode: "auto"
+
+  # 随机种子，保证仿真可复现
+  random_seed:  2026
+
+  # 主控制/仿真更新频率。10Hz 表示 dt=0.1s
+  update_rate:  10.0   # Hz
+  path_color_r: 0.2
+  path_color_g: 0.8
+  path_color_b: 1.0
+
+  # 地图坐标系，需与 forklift_map 保持一致
+  frame_id: "map"
+
+  multi_vehicle:
+    # 多车基础配置
+    vehicle_count: 8
+    random_seed: 2026
+
+    # 预设起点/终点货位。车辆 i 使用 start_slots[i] -> target_slots[i]
+    # 当前这组是 8 对互不冲突、较长距离的全程前进测试任务。
+    start_slots:  [38, 20, 36, 35, 56, 40, 57, 21]
+    target_slots: [ 9, 10,  8,  41, 52, 55, 42, 64]
+    randomize_start: false
+
+    # 简化实车冒烟测试：为每辆车选择较近且全程前进的目标，覆盖上面的 target_slots。
+    simple_forward_demo: false
+
+    # 多车仿真/协调运动学参数
+    nominal_speed: 0.20
+    max_speed: 0.26
+    max_accel: 0.20
+    max_decel: 0.30
+    lat_accel_max: 0.06
+    safety_margin: 0.00
+    conflict_margin: 0.04
+
+    # 滚动轨迹与休眠配置
+    dwell_time: 5.0               # s，到达目标货位后的休眠/等待时间
+    rolling_horizon: 10.0         # s，每次生成未来多长时间的轨迹
+    rolling_refresh_period: 2.0   # s，每隔多久重新计算并覆盖发布轨迹
+
+    # 实车模式：true 时读取 /object，发布 /traj_i 与 /coord_speed_i
+    real_mode: false
+    one_shot_traj: false        # true=一次性规划，false=滚动时域
+
+    # 前瞻预测参数
+    prediction_horizon: 10.0
+    prediction_step: 0.05
+
+    # 离散动作速度比例
+    creep_ratio: 0.25
+    yield_ratio: 0.50
+    boost_ratio: 1.20
+    enable_boost: true
+
+    # 局部规则时间阈值
+    emergency_time: 0.80
+    final_decision_time: 2.00
+    warning_time: 5.00
+    starvation_wait_time: 8.0
+
+    # 动作保持时间：防止 STOP/NOMINAL、YIELD/NOMINAL 每拍抖动。
+    # 制动更强的动作会立即生效；放松动作至少保持该时间后才允许发生。
+    action_hold_time: 0.4
+
+    # 协调规则开关。硬碰撞保护始终启用，这些只是策略层开关。
+    enable_priority_tiebreak: true    # 对称冲突时使用优先级打破平局
+    enable_stall_release: false       # 旧版停滞释放策略，默认关闭
+    enable_deadlock_reverse: false    # 旧版倒车破死锁策略，默认关闭
+    enable_cycle_break: false         # 旧版环路打破策略，默认关闭
+    enable_deadlock_recovery: true    # 死锁恢复：从当前位置重规划到空货位脱困
+
+    # 目标货位/泊车队列窗口
+    target_request_distance: 0.45
+    target_stop_distance: 0.12
+
+    # 跟车距离阈值
+    following_normal_distance: 0.35
+    following_creep_distance: 0.22
+    following_min_distance: 0.13
+
+    # 路径与任务过滤
+    skip_arc_fallback_paths: true
+    reject_curvature_discontinuity: true
+    reject_boundary_violations: true
+    reject_shelf_collisions: true
+    reject_path_kinks: true
+    kink_min_angle: 0.61    # rad，约 35deg；小于该角度视为平滑转弯
+    kink_cusp_angle: 2.53   # rad，约 145deg；大于该角度视为正常换向尖点
+    path_validation_step: 0.02
+    precompute_task_filter: true
+    log_invalid_task_pairs: false
+    quiet_task_filter_precompute: true
+
+    # 确定性任务选择记忆，避免频繁重复选择同一目标/同一排
+    recent_target_memory: 5
+    recent_row_memory: 4
+
+    # 可视化
+    show_paths: true
+    show_prediction_conflicts: true

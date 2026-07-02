@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<!-- ============================================================
+     实车实验:把仿真多车协调搬上真车(realbridge)
+       定位(vrpn+nokov) → realbridge(/object→forklift协调→/traj_i+/coord_speed_i)
+         → 8×pure_pursuit(纵向用/coord_speed, 横向跟/traj) → chassis → 实车
+     配置一律用 forklift 仿真那套(map_param + planner_param),与仿真完全一致。
+     用法: roslaunch forklift_planner realbridge_exp.launch server:=10.1.1.198
+     或一键: ./exp_scripts/run_realbridge.sh
+     ============================================================ -->
+<launch>
+  <arg name="server" default="10.1.1.198"/>   <!-- 动捕 VRPN 服务器 IP -->
+  <arg name="controller" default="pp"/>        <!-- 控制器: pp(纯跟踪) | lqr(状态反馈) -->
+  <arg name="lqr_q" default="1.0"/>            <!-- LQR 横向权重: 1.0原版 | 8调后(二选一) -->
+  <!-- 实车安全/到点阈值(现场可调;也可运行中 rosparam set 后无需重启) -->
+  <arg name="pose_timeout" default="0.5"/>     <!-- s: 动捕失联>此值→该车 coord_speed=0(防盲走) -->
+  <arg name="arrive_tol"   default="0.05"/>    <!-- m: path_s 距终点<此值即判到点(>PP的2cm,防卡死) -->
+  <arg name="cmd_timeout"  default="0.4"/>     <!-- s: 底盘>此值没收到该车指令→发0(防控制器崩溃跑飞) -->
+  <arg name="emerg_margin" default="0.08"/>    <!-- m: 实车硬护栏,两车真实足迹逼近<此值→双方急停(0=关) -->
+  <arg name="veh_count"    default="8"/>       <!-- 实车车数 1..8:只跑这么多车+这么多控制器(排查时可只跑1辆) -->
+  <arg name="target_only"  default="-1"/>      <!-- -1=全车; 0..7=只控制指定ID单车,路径仍按该ID的start/target槽位生成 -->
+  <arg name="long_pid"     default="true"/>    <!-- PP纵向: true=位置PID | false=直接coord_speed(退路) -->
+  <arg name="long_kp"      default="1.8"/>     <!-- PP纵向位置反馈增益 -->
+  <arg name="look_scale"   default="1.0"/>    <!-- PP前瞻额外缩放(AD公式已自适应,保持1.0) -->
+  <arg name="a_lat"        default="0.10"/>    <!-- 曲率限速侧向加速度上限[m/s²](规划侧,sim/实车共用):越小弯越慢跟越紧 -->
+
+
+  <!-- ① forklift 协调配置(地图 + 规划/协调参数)——realbridge 读这套,与仿真一致 -->
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+  <!-- 车数覆盖(放在 planner_param 之后,覆盖其 vehicle_count;协调侧已 clamp 到 [1,8]) -->
+  <param name="/forklift_planner/multi_vehicle/vehicle_count" value="$(arg veh_count)"/>
+
+  <!-- ② 实车控制/底盘增益 -->
+  <rosparam command="load" file="$(find chassis)/config/vehicle_chassis_gains.yaml" />
+  <rosparam command="load" file="$(find pure_pursuit)/config/vehicle_controller_gains.yaml" />
+
+  <!-- ③ 定位:动捕 VRPN 客户端 + nokov 解算 → /object(后轮中心位姿) -->
+  <include file="$(find vrpn_client_ros)/launch/sample.launch">
+    <arg name="server" value="$(arg server)"/>
+  </include>
+  <node pkg="nokov_localization" type="nokov_localization_v2.py" name="nokov" output="screen"/>
+
+  <!-- ④ 底盘:串口驱动实车(/chassis → /dev/ttyUSB0)。原版,无看门狗(看门狗版会段错误,已回退) -->
+  <node pkg="chassis" type="chassis_node" name="chassis" output="screen"/>
+
+  <!-- ⑤ 场景可视化(仓库地图 + RViz),仅用于对齐/观察,可选 -->
+  <node pkg="forklift_map" type="map_node" name="forklift_map" output="screen"/>
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz" required="false"/>
+
+  <!-- ⑥ 协调:用 sim 同一个节点开 real_mode(一份代码两个模式),位置取 /object、
+          发 /traj_i + /coord_speed_i,协调/DWELL/预测错峰与仿真逐字节一致。
+          启动后终端打印每辆车应摆放的真实坐标(也写 /tmp/realbridge_positions.txt)。 -->
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="true"/>
+  <param name="/forklift_planner/multi_vehicle/real_pose_timeout" value="$(arg pose_timeout)"/>
+  <param name="/forklift_planner/multi_vehicle/real_arrive_tol" value="$(arg arrive_tol)"/>
+  <param name="/forklift_planner/multi_vehicle/real_emergency_margin" value="$(arg emerg_margin)"/>
+  <param name="/forklift_planner/multi_vehicle/lat_accel_max" value="$(arg a_lat)"/>   <!-- 曲率限速(规划侧) -->
+  <node pkg="forklift_planner" type="multi_vehicle_patrol_node" name="multi_vehicle_patrol_node"
+        output="screen">
+    <param name="target_only" value="$(arg target_only)"/>
+  </node>
+
+  <!-- ⑦ 车控制(target 0..veh_count-1):每个仅当 veh_count>target 才起 → 想跑几辆起几辆。
+       按 controller 选 pp/lqr。横向跟 /traj_i,纵向用 /coord_speed_i。 -->
+  <include if="$(eval int(arg('target_only')) == 0 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 0))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="0"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 1 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 1))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="1"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 2 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 2))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="2"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 3 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 3))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="3"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 4 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 4))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="4"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 5 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 5))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="5"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 6 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 6))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="6"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+  <include if="$(eval int(arg('target_only')) == 7 or (int(arg('target_only')) &lt; 0 and int(arg('veh_count')) > 7))" file="$(find forklift_planner)/launch/one_controller.launch">
+    <arg name="target" value="7"/> <arg name="controller" value="$(arg controller)"/><arg name="lqr_q" value="$(arg lqr_q)"/><arg name="long_pid" value="$(arg long_pid)"/><arg name="long_kp" value="$(arg long_kp)"/><arg name="look_scale" value="$(arg look_scale)"/></include>
+</launch>

@@ -1,0 +1,14 @@
+<launch>
+  <!-- 无头快速回归:狂跑 N 仿真分钟(确定性,不启 rviz/不按实时),节点退出码 1=有碰撞。
+       用法:roslaunch forklift_planner multi_vehicle_batch.launch minutes:=120 -->
+  <arg name="minutes" default="120"/>
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+
+  <node pkg="forklift_planner"
+        type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node"
+        output="screen" required="true">
+    <param name="batch_minutes" value="$(arg minutes)"/>
+  </node>
+</launch>
