@@ -2,6 +2,7 @@
 #include <visualization_msgs/MarkerArray.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <memory>
@@ -173,6 +174,45 @@ double midpoint(double a, double b) {
     return 0.5 * (a + b);
 }
 
+double normAngle(double a) {
+    while (a > kPi) a -= 2.0 * kPi;
+    while (a <= -kPi) a += 2.0 * kPi;
+    return a;
+}
+
+double angleLerp(double a, double b, double u) {
+    return normAngle(a + normAngle(b - a) * u);
+}
+
+RoughWp poseAtS(const RoughPath& path, double query_s) {
+    if (path.empty()) return {0.0, 0.0, 0.0, WpType::FORWARD};
+    if (path.size() == 1 || query_s <= 0.0) return path.front();
+
+    double acc = 0.0;
+    for (size_t i = 1; i < path.size(); ++i) {
+        const RoughWp& a = path[i - 1];
+        const RoughWp& b = path[i];
+        const double seg = std::hypot(b.x - a.x, b.y - a.y);
+        if (seg <= 1e-9) continue;
+        if (acc + seg >= query_s) {
+            const double u = std::max(0.0, std::min(1.0, (query_s - acc) / seg));
+            return {a.x + (b.x - a.x) * u,
+                    a.y + (b.y - a.y) * u,
+                    angleLerp(a.theta, b.theta, u),
+                    u < 0.5 ? a.type : b.type};
+        }
+        acc += seg;
+    }
+    return path.back();
+}
+
+std::string uppercase(std::string s) {
+    for (char& ch : s) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
+
 }  // namespace
 
 class PathCatalogDebugNode {
@@ -193,6 +233,11 @@ public:
         nh_.param("a2_x", a2_x_, 1.25);
         nh_.param("a2_y", a2_y_, 0.12);
         nh_.param("a2_yaw", a2_yaw_, kPi * 0.5);
+        nh_.param("depot", depot_name_, depot_name_);
+        nh_.param("target_slot", target_slot_, target_slot_);
+        nh_.param("animate", animate_, animate_);
+        nh_.param("animation_period", animation_period_, animation_period_);
+        nh_.param("animation_duration", animation_duration_, animation_duration_);
 
         if (use_exact_midpoints_ && map_->slots().size() > 61) {
             const Slot& b4 = map_->slots().at(4);
@@ -213,6 +258,15 @@ public:
             "/forklift_map/markers", 1, true);
 
         publish();
+        if (!selected_path_.empty()) {
+            animation_start_ = ros::Time::now();
+            publishVehicleMarker(poseAtS(selected_path_, 0.0));
+            if (animate_) {
+                timer_ = nh_.createTimer(ros::Duration(animation_period_),
+                                         &PathCatalogDebugNode::onAnimationTimer,
+                                         this);
+            }
+        }
     }
 
 private:
@@ -236,6 +290,11 @@ private:
         ROS_WARN("[path_catalog] A2 targets (%zu): [%s]",
                  a2_targets.size(), idsToString(a2_targets).c_str());
 
+        if (target_slot_ >= 0) {
+            publishSinglePath(a1, a2, a1_targets, a2_targets);
+            return;
+        }
+
         visualization_msgs::MarkerArray arr;
         int id = 0;
         addDepotMarkers(arr, id, a1, "A1", rgba(0.1f, 0.65f, 1.0f, 1.0f));
@@ -250,9 +309,69 @@ private:
         buildAndDrawPaths(arr, id, a2, a2_targets, "A2",
                           rgba(1.0f, 0.55f, 0.05f, 0.42f), 0.065);
 
+        static_markers_ = arr;
         pub_.publish(arr);
         ROS_WARN("[path_catalog] published %zu markers on /forklift_map/markers",
                  arr.markers.size());
+    }
+
+    void publishSinglePath(const Slot& a1,
+                           const Slot& a2,
+                           const std::vector<int>& a1_targets,
+                           const std::vector<int>& a2_targets) {
+        if (target_slot_ < 0 ||
+            target_slot_ >= static_cast<int>(map_->slots().size())) {
+            ROS_ERROR("[path_catalog] target_slot=%d is out of range [0,%zu)",
+                      target_slot_, map_->slots().size());
+            return;
+        }
+
+        const std::string depot = uppercase(depot_name_);
+        const bool use_a2 = depot == "A2";
+        const Slot& src = use_a2 ? a2 : a1;
+        const std::string label = use_a2 ? "A2" : "A1";
+        const auto& allowed = use_a2 ? a2_targets : a1_targets;
+        if (std::find(allowed.begin(), allowed.end(), target_slot_) ==
+            allowed.end()) {
+            ROS_WARN("[path_catalog] %s -> B%d is outside the current half-map target set; generating anyway for inspection",
+                     label.c_str(), target_slot_);
+        }
+
+        const Slot& dst = map_->slots().at(static_cast<size_t>(target_slot_));
+        PathGenerationInfo info;
+        selected_path_ = generator_->generate(src, dst, &info);
+        selected_label_ = label + "_to_B" + std::to_string(target_slot_);
+        if (selected_path_.size() < 2) {
+            ROS_ERROR("[path_catalog] %s failed: empty path", selected_label_.c_str());
+            selected_path_.clear();
+            return;
+        }
+
+        const std_msgs::ColorRGBA color =
+            use_a2 ? rgba(1.0f, 0.55f, 0.05f, 1.0f)
+                   : rgba(0.1f, 0.65f, 1.0f, 1.0f);
+        const double len = pathLength(selected_path_);
+        ROS_WARN("[path_catalog] single path %s row=%d col=%d wpts=%zu len=%.3f arc=%d animate=%d",
+                 selected_label_.c_str(), dst.row_id, dst.col,
+                 selected_path_.size(), len, info.used_arc_fallback ? 1 : 0,
+                 animate_ ? 1 : 0);
+
+        visualization_msgs::MarkerArray arr;
+        int id = 0;
+        addDepotMarkers(arr, id, src, label, color);
+        addSphere(arr, pp_.frame_id, "single_target_point", id++, dst.cx, dst.cy,
+                  rgba(1.0f, 1.0f, 1.0f, 1.0f));
+        addText(arr, pp_.frame_id, "single_target_label", id++, dst.cx, dst.cy,
+                0.19, 0.075, "B" + std::to_string(target_slot_),
+                rgba(1.0f, 1.0f, 1.0f, 1.0f));
+        addPath(arr, pp_.frame_id, "single_path", id++, selected_path_, color,
+                0.075);
+        addText(arr, pp_.frame_id, "single_path_label", id++,
+                midpoint(src.cx, dst.cx), midpoint(src.cy, dst.cy), 0.22,
+                0.07, selected_label_, color);
+        static_markers_ = arr;
+        pub_.publish(arr);
+        ROS_WARN("[path_catalog] published single path markers on /forklift_map/markers");
     }
 
     void addDepotMarkers(visualization_msgs::MarkerArray& arr,
@@ -311,8 +430,57 @@ private:
                  depot_label.c_str(), ok, targets.size(), failed);
     }
 
+    void onAnimationTimer(const ros::TimerEvent&) {
+        if (selected_path_.empty()) return;
+        const double len = pathLength(selected_path_);
+        if (len <= 1e-9) return;
+        const double elapsed =
+            std::max(0.0, (ros::Time::now() - animation_start_).toSec());
+        const double period = std::max(0.5, animation_duration_);
+        const double phase = std::fmod(elapsed, period) / period;
+        publishVehicleMarker(poseAtS(selected_path_, len * phase));
+    }
+
+    void publishVehicleMarker(const RoughWp& ref) {
+        visualization_msgs::MarkerArray arr = static_markers_;
+
+        RoughWp center = ref;
+        center.x += mp_.rear_axle_to_center * std::cos(ref.theta);
+        center.y += mp_.rear_axle_to_center * std::sin(ref.theta);
+
+        auto body = baseMarker(pp_.frame_id, "single_vehicle_body", 0);
+        body.type = visualization_msgs::Marker::CUBE;
+        body.pose.position.x = center.x;
+        body.pose.position.y = center.y;
+        body.pose.position.z = 0.13;
+        body.pose.orientation.z = std::sin(center.theta * 0.5);
+        body.pose.orientation.w = std::cos(center.theta * 0.5);
+        body.scale.x = mp_.vehicle_length;
+        body.scale.y = mp_.vehicle_width;
+        body.scale.z = 0.045;
+        body.color = ref.type == WpType::REVERSE
+            ? rgba(1.0f, 0.25f, 0.25f, 0.85f)
+            : rgba(0.2f, 1.0f, 0.35f, 0.85f);
+        arr.markers.push_back(body);
+
+        auto arrow = baseMarker(pp_.frame_id, "single_vehicle_heading", 1);
+        arrow.type = visualization_msgs::Marker::ARROW;
+        arrow.points.push_back(point(center.x, center.y, 0.18));
+        arrow.points.push_back(point(center.x + 0.18 * std::cos(center.theta),
+                                     center.y + 0.18 * std::sin(center.theta), 0.18));
+        arrow.scale.x = 0.018;
+        arrow.scale.y = 0.045;
+        arrow.scale.z = 0.055;
+        arrow.color = rgba(1.0f, 1.0f, 1.0f, 1.0f);
+        arr.markers.push_back(arrow);
+
+        pub_.publish(arr);
+    }
+
     ros::NodeHandle nh_;
     ros::Publisher pub_;
+    ros::Timer timer_;
+    visualization_msgs::MarkerArray static_markers_;
     MapParam mp_;
     PlannerParam pp_;
     std::unique_ptr<ForkliftMap> map_;
@@ -325,6 +493,15 @@ private:
     double a2_x_ = 1.25;
     double a2_y_ = 0.12;
     double a2_yaw_ = kPi * 0.5;
+
+    std::string depot_name_ = "A1";
+    int target_slot_ = -1;
+    bool animate_ = true;
+    double animation_period_ = 0.05;
+    double animation_duration_ = 8.0;
+    ros::Time animation_start_;
+    RoughPath selected_path_;
+    std::string selected_label_;
 };
 
 int main(int argc, char** argv) {

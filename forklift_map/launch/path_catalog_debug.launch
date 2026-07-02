@@ -1,4 +1,12 @@
 <launch>
+  <!-- target_slot=-1 shows all A1/A2 catalog paths.
+       target_slot=5 with depot=A1 animates A1 -> B5.
+       target_slot=65 with depot=A2 animates A2 -> B65. -->
+  <arg name="depot" default="A1"/>
+  <arg name="target_slot" default="-1"/>
+  <arg name="animate" default="true"/>
+  <arg name="animation_duration" default="8.0"/>
+
   <param name="/use_sim_time" value="false"/>
 
   <rosparam file="$(find forklift_map)/config/map_param.yaml" command="load"/>
@@ -20,6 +28,12 @@
     <param name="a2_x" value="1.25"/>
     <param name="a2_y" value="0.12"/>
     <param name="a2_yaw" value="1.57079632679"/>
+
+    <param name="depot" type="str" value="$(arg depot)"/>
+    <param name="target_slot" type="int" value="$(arg target_slot)"/>
+    <param name="animate" type="bool" value="$(arg animate)"/>
+    <param name="animation_duration" type="double" value="$(arg animation_duration)"/>
+    <param name="animation_period" type="double" value="0.05"/>
   </node>
 
   <node name="rviz" pkg="rviz" type="rviz"
