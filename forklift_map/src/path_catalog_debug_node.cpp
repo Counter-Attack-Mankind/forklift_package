@@ -15,6 +15,8 @@
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
 #include "forklift_map/map_types.h"
+#include "forklift_planner/multi_vehicle/footprint.h"
+#include "forklift_planner/multi_vehicle/multi_vehicle_config.h"
 #include "forklift_planner/path_generator.h"
 #include "forklift_planner/planner_param.h"
 #include "std_msgs/ColorRGBA.h"
@@ -213,6 +215,29 @@ std::string uppercase(std::string s) {
     return s;
 }
 
+enum class DebugRejectReason {
+    NONE,
+    EMPTY_PATH,
+    CURVATURE_DISCONTINUITY,
+    FOOTPRINT_OUT_OF_BOUNDS,
+    SHELF_COLLISION,
+    KINK,
+};
+
+const char* rejectReasonName(DebugRejectReason reason) {
+    switch (reason) {
+        case DebugRejectReason::NONE: return "none";
+        case DebugRejectReason::EMPTY_PATH: return "empty_path";
+        case DebugRejectReason::CURVATURE_DISCONTINUITY:
+            return "curvature_discontinuity";
+        case DebugRejectReason::FOOTPRINT_OUT_OF_BOUNDS:
+            return "footprint_out_of_bounds";
+        case DebugRejectReason::SHELF_COLLISION: return "shelf_collision";
+        case DebugRejectReason::KINK: return "kink";
+    }
+    return "unknown";
+}
+
 }  // namespace
 
 class PathCatalogDebugNode {
@@ -221,6 +246,8 @@ public:
         ros::NodeHandle param_nh;
         mp_ = MapParam::fromROSParam(param_nh);
         pp_ = PlannerParam::fromROSParam(param_nh);
+        cfg_ = forklift_planner::multi_vehicle::MultiVehicleConfig::fromROSParam(
+            param_nh);
         map_ = std::make_unique<ForkliftMap>(mp_);
         generator_ = std::make_unique<PathGenerator>(mp_, pp_);
 
@@ -274,40 +301,36 @@ private:
         const Slot a1 = makeVirtualStart("A1", -101, 0, a1_x_, a1_y_, a1_yaw_);
         const Slot a2 = makeVirtualStart("A2", -102, 7, a2_x_, a2_y_, a2_yaw_);
 
-        std::vector<int> a1_targets;
-        std::vector<int> a2_targets;
-        const double split_y = mp_.field_height * 0.5;
+        std::vector<int> all_targets;
         for (const Slot& s : map_->slots()) {
-            if (s.cy >= split_y) {
-                a1_targets.push_back(s.id);
-            } else {
-                a2_targets.push_back(s.id);
-            }
+            if (s.id >= 0 && s.id <= 65) all_targets.push_back(s.id);
         }
 
-        ROS_WARN("[path_catalog] A1 targets (%zu): [%s]",
-                 a1_targets.size(), idsToString(a1_targets).c_str());
-        ROS_WARN("[path_catalog] A2 targets (%zu): [%s]",
-                 a2_targets.size(), idsToString(a2_targets).c_str());
+        const bool use_a2 = uppercase(depot_name_) == "A2";
+        const Slot& depot = use_a2 ? a2 : a1;
+        const std::string label = use_a2 ? "A2" : "A1";
+
+        ROS_WARN("[path_catalog] selected depot=%s targets B0..B65 (%zu): [%s]",
+                 label.c_str(), all_targets.size(), idsToString(all_targets).c_str());
 
         if (target_slot_ >= 0) {
-            publishSinglePath(a1, a2, a1_targets, a2_targets);
+            publishSinglePath(depot, label);
             return;
         }
 
         visualization_msgs::MarkerArray arr;
         int id = 0;
-        addDepotMarkers(arr, id, a1, "A1", rgba(0.1f, 0.65f, 1.0f, 1.0f));
-        addDepotMarkers(arr, id, a2, "A2", rgba(1.0f, 0.55f, 0.05f, 1.0f));
-        addTargetMarkers(arr, id, a1_targets, rgba(0.2f, 0.8f, 1.0f, 0.9f),
-                         "A1_target");
-        addTargetMarkers(arr, id, a2_targets, rgba(1.0f, 0.75f, 0.2f, 0.9f),
-                         "A2_target");
+        const std_msgs::ColorRGBA color =
+            use_a2 ? rgba(1.0f, 0.55f, 0.05f, 1.0f)
+                   : rgba(0.1f, 0.65f, 1.0f, 1.0f);
+        addDepotMarkers(arr, id, depot, label, color);
+        addTargetMarkers(arr, id, all_targets, rgba(1.0f, 1.0f, 1.0f, 0.85f),
+                         "all_B_targets");
 
-        buildAndDrawPaths(arr, id, a1, a1_targets, "A1",
-                          rgba(0.15f, 0.75f, 1.0f, 0.42f), 0.055);
-        buildAndDrawPaths(arr, id, a2, a2_targets, "A2",
-                          rgba(1.0f, 0.55f, 0.05f, 0.42f), 0.065);
+        buildAndDrawPaths(arr, id, depot, all_targets, label,
+                          use_a2 ? rgba(1.0f, 0.55f, 0.05f, 0.42f)
+                                 : rgba(0.15f, 0.75f, 1.0f, 0.42f),
+                          0.065);
 
         static_markers_ = arr;
         pub_.publish(arr);
@@ -315,38 +338,29 @@ private:
                  arr.markers.size());
     }
 
-    void publishSinglePath(const Slot& a1,
-                           const Slot& a2,
-                           const std::vector<int>& a1_targets,
-                           const std::vector<int>& a2_targets) {
+    void publishSinglePath(const Slot& src,
+                           const std::string& label) {
         if (target_slot_ < 0 ||
-            target_slot_ >= static_cast<int>(map_->slots().size())) {
+            target_slot_ >= static_cast<int>(map_->slots().size()) ||
+            target_slot_ > 65) {
             ROS_ERROR("[path_catalog] target_slot=%d is out of range [0,%zu)",
                       target_slot_, map_->slots().size());
             return;
-        }
-
-        const std::string depot = uppercase(depot_name_);
-        const bool use_a2 = depot == "A2";
-        const Slot& src = use_a2 ? a2 : a1;
-        const std::string label = use_a2 ? "A2" : "A1";
-        const auto& allowed = use_a2 ? a2_targets : a1_targets;
-        if (std::find(allowed.begin(), allowed.end(), target_slot_) ==
-            allowed.end()) {
-            ROS_WARN("[path_catalog] %s -> B%d is outside the current half-map target set; generating anyway for inspection",
-                     label.c_str(), target_slot_);
         }
 
         const Slot& dst = map_->slots().at(static_cast<size_t>(target_slot_));
         PathGenerationInfo info;
         selected_path_ = generator_->generate(src, dst, &info);
         selected_label_ = label + "_to_B" + std::to_string(target_slot_);
-        if (selected_path_.size() < 2) {
-            ROS_ERROR("[path_catalog] %s failed: empty path", selected_label_.c_str());
+        const DebugRejectReason reject = validatePath(selected_path_, info, src, dst);
+        if (reject != DebugRejectReason::NONE) {
+            ROS_ERROR("[path_catalog] %s rejected by task-style validation: %s",
+                      selected_label_.c_str(), rejectReasonName(reject));
             selected_path_.clear();
             return;
         }
 
+        const bool use_a2 = label == "A2";
         const std_msgs::ColorRGBA color =
             use_a2 ? rgba(1.0f, 0.55f, 0.05f, 1.0f)
                    : rgba(0.1f, 0.65f, 1.0f, 1.0f);
@@ -412,10 +426,11 @@ private:
             PathGenerationInfo info;
             const Slot& dst = map_->slots().at(static_cast<size_t>(target));
             RoughPath path = generator_->generate(depot, dst, &info);
-            if (path.size() < 2) {
+            const DebugRejectReason reject = validatePath(path, info, depot, dst);
+            if (reject != DebugRejectReason::NONE) {
                 ++failed;
-                ROS_ERROR("[path_catalog] %s -> B%d failed: empty path",
-                          depot_label.c_str(), target);
+                ROS_ERROR("[path_catalog] %s -> B%d rejected: %s",
+                          depot_label.c_str(), target, rejectReasonName(reject));
                 continue;
             }
             ++ok;
@@ -428,6 +443,133 @@ private:
         }
         ROS_WARN("[path_catalog] %s generated %d/%zu paths, failed=%d",
                  depot_label.c_str(), ok, targets.size(), failed);
+    }
+
+    bool poseInSlotSweep(const RoughWp& pose, const Slot& slot) const {
+        const double ax = slot.dock_x();
+        const double ay = slot.dock_y();
+        const double bx = slot.pre_dock_x;
+        const double by = slot.pre_dock_y;
+        const double vx = bx - ax;
+        const double vy = by - ay;
+        const double len = std::hypot(vx, vy);
+        if (len < 1e-6) return false;
+
+        const double ux = vx / len;
+        const double uy = vy / len;
+        const double dx = pose.x - ax;
+        const double dy = pose.y - ay;
+        const double longitudinal = dx * ux + dy * uy;
+        const double lateral = -dx * uy + dy * ux;
+
+        const double long_margin = mp_.vehicle_length * 0.65;
+        const double lat_margin = mp_.vehicle_width * 0.60;
+        return longitudinal >= -long_margin &&
+               longitudinal <= len + long_margin &&
+               std::abs(lateral) <= lat_margin;
+    }
+
+    bool footprintCollidesWithShelf(const RoughWp& pose,
+                                    const Slot& src,
+                                    const Slot& target) const {
+        if (poseInSlotSweep(pose, src) || poseInSlotSweep(pose, target)) {
+            return false;
+        }
+        for (const ShelfBlock& shelf : map_->shelf_blocks()) {
+            if (forklift_planner::multi_vehicle::footprintIntersectsShelf(
+                    pose, shelf, mp_, 0.0)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    RoughWp interpolatePose(const RoughWp& a, const RoughWp& b,
+                            double ratio) const {
+        return {a.x + (b.x - a.x) * ratio,
+                a.y + (b.y - a.y) * ratio,
+                angleLerp(a.theta, b.theta, ratio),
+                ratio < 0.5 ? a.type : b.type};
+    }
+
+    DebugRejectReason validatePose(const RoughWp& pose,
+                                   const Slot& src,
+                                   const Slot& target) const {
+        if (cfg_.reject_boundary_violations &&
+            !forklift_planner::multi_vehicle::footprintInsideField(
+                pose, mp_, 0.0)) {
+            return DebugRejectReason::FOOTPRINT_OUT_OF_BOUNDS;
+        }
+        if (cfg_.reject_shelf_collisions &&
+            footprintCollidesWithShelf(pose, src, target)) {
+            return DebugRejectReason::SHELF_COLLISION;
+        }
+        return DebugRejectReason::NONE;
+    }
+
+    DebugRejectReason validatePath(const RoughPath& path,
+                                   const PathGenerationInfo& info,
+                                   const Slot& src,
+                                   const Slot& target) const {
+        if (path.size() < 2) return DebugRejectReason::EMPTY_PATH;
+        if (cfg_.reject_curvature_discontinuity && info.used_arc_fallback) {
+            return DebugRejectReason::CURVATURE_DISCONTINUITY;
+        }
+
+        if (cfg_.reject_path_kinks) {
+            bool have_prev = false;
+            double prev_dx = 0.0;
+            double prev_dy = 0.0;
+            double prev_len = 0.0;
+            WpType prev_type = path.front().type;
+            for (size_t i = 0; i + 1 < path.size(); ++i) {
+                const double dx = path[i + 1].x - path[i].x;
+                const double dy = path[i + 1].y - path[i].y;
+                const double len = std::hypot(dx, dy);
+                if (len < 1e-4) continue;
+
+                const WpType type = path[i + 1].type;
+                if (!have_prev) {
+                    prev_dx = dx;
+                    prev_dy = dy;
+                    prev_len = len;
+                    prev_type = type;
+                    have_prev = true;
+                    continue;
+                }
+
+                double c = (prev_dx * dx + prev_dy * dy) / (prev_len * len);
+                c = std::max(-1.0, std::min(1.0, c));
+                const double ang = std::acos(c);
+                const bool legal_reverse_cusp =
+                    prev_type != type && ang >= cfg_.kink_cusp_angle;
+                if (ang > cfg_.kink_min_angle && !legal_reverse_cusp) {
+                    return DebugRejectReason::KINK;
+                }
+
+                prev_dx = dx;
+                prev_dy = dy;
+                prev_len = len;
+                prev_type = type;
+            }
+        }
+
+        const double check_ds = std::max(0.005, cfg_.path_validation_step);
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+            const double seg_len = std::hypot(path[i + 1].x - path[i].x,
+                                              path[i + 1].y - path[i].y);
+            const int steps =
+                std::max(1, static_cast<int>(std::ceil(seg_len / check_ds)));
+            for (int k = 0; k < steps; ++k) {
+                const double ratio =
+                    static_cast<double>(k) / static_cast<double>(steps);
+                const DebugRejectReason reason =
+                    validatePose(interpolatePose(path[i], path[i + 1], ratio),
+                                 src, target);
+                if (reason != DebugRejectReason::NONE) return reason;
+            }
+        }
+        return validatePose(path.back(), src, target);
     }
 
     void onAnimationTimer(const ros::TimerEvent&) {
@@ -483,6 +625,7 @@ private:
     visualization_msgs::MarkerArray static_markers_;
     MapParam mp_;
     PlannerParam pp_;
+    forklift_planner::multi_vehicle::MultiVehicleConfig cfg_;
     std::unique_ptr<ForkliftMap> map_;
     std::unique_ptr<PathGenerator> generator_;
 

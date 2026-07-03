@@ -46,6 +46,8 @@ add_executable(path_catalog_debug_node
   ../forklift_planner/src/path_generator.cpp
   ../forklift_planner/src/path_generator_internal.cpp
   ../forklift_planner/src/path_generator_route.cpp
+  ../forklift_planner/src/multi_vehicle/footprint.cpp
+  ../forklift_planner/src/multi_vehicle/multi_vehicle_config.cpp
   src/path_catalog_debug_node.cpp
 )
 add_dependencies(path_catalog_debug_node ${catkin_EXPORTED_TARGETS})

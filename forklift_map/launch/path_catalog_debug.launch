@@ -1,5 +1,5 @@
 <launch>
-  <!-- target_slot=-1 shows all A1/A2 catalog paths.
+  <!-- target_slot=-1 shows the selected depot to all B0..B65 paths.
        target_slot=5 with depot=A1 animates A1 -> B5.
        target_slot=65 with depot=A2 animates A2 -> B65. -->
   <arg name="depot" default="A1"/>
